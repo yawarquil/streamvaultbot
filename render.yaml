@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: streamvault-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
@@ -13,3 +13,5 @@ services:
         value: "https://t.me/streamvaultt"
       - key: WEBSITE_URL
         value: "https://streamvault.live"
+      - key: PORT
+        value: "10000"

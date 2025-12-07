@@ -1,10 +1,10 @@
 """
-StreamVault Telegram Bot - Interactive + Auto-Posting Version
+StreamVault Telegram Bot - With Health Check for Free Hosting
 
 Features:
 - Interactive commands (/start, /latest, /movies, /shows, /search, /help)
 - AUTO-POSTS new content to channel every 30 minutes
-- Promotes the channel with modern formatting
+- HTTP health check endpoint to keep free hosting alive
 """
 import json
 import asyncio
@@ -12,7 +12,9 @@ import logging
 from pathlib import Path
 from typing import Optional
 import random
-from datetime import datetime
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
 
 import requests
 from telegram import Bot, Update
@@ -38,16 +40,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Auto-post interval in seconds (30 minutes = 1800 seconds)
+# Auto-post interval in seconds (30 minutes)
 AUTO_POST_INTERVAL = 1800
+
+# Health check port
+PORT = int(os.environ.get("PORT", 10000))
 
 # Cache for content
 shows_cache = []
 movies_cache = []
 
 
+# ==================== HEALTH CHECK SERVER ====================
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'StreamVault Bot is running!')
+    
+    def log_message(self, format, *args):
+        pass  # Suppress logs
+
+
+def run_health_server():
+    """Run HTTP server for health checks."""
+    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+    logger.info(f"🏥 Health check server running on port {PORT}")
+    server.serve_forever()
+
+
+# ==================== HELPER FUNCTIONS ====================
+
 def load_posted_content() -> dict:
-    """Load the list of already posted content IDs."""
     try:
         if Path(POSTED_CONTENT_FILE).exists():
             with open(POSTED_CONTENT_FILE, 'r') as f:
@@ -58,13 +84,11 @@ def load_posted_content() -> dict:
 
 
 def save_posted_content(data: dict):
-    """Save the list of posted content IDs."""
     with open(POSTED_CONTENT_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
 
 def fetch_content(api_url: str) -> list:
-    """Fetch content from StreamVault API."""
     try:
         response = requests.get(api_url, timeout=30)
         response.raise_for_status()
@@ -75,7 +99,6 @@ def fetch_content(api_url: str) -> list:
 
 
 def refresh_cache():
-    """Refresh the content cache."""
     global shows_cache, movies_cache
     shows_cache = fetch_content(STREAMVAULT_API_SHOWS)
     movies_cache = fetch_content(STREAMVAULT_API_MOVIES)
@@ -83,14 +106,12 @@ def refresh_cache():
 
 
 def truncate_text(text: str, max_length: int = 200) -> str:
-    """Truncate text to max length with ellipsis."""
     if len(text) <= max_length:
         return text
     return text[:max_length-3].rsplit(' ', 1)[0] + "..."
 
 
 def format_show_message(show: dict) -> str:
-    """Format a TV show for Telegram message with modern styling."""
     title = show.get('title', 'Unknown Title')
     year = show.get('year') or show.get('releaseYear', '')
     slug = show.get('slug', '')
@@ -145,7 +166,6 @@ def format_show_message(show: dict) -> str:
 
 
 def format_movie_message(movie: dict) -> str:
-    """Format a movie for Telegram message with modern styling."""
     title = movie.get('title', 'Unknown Title')
     year = movie.get('year', '')
     slug = movie.get('slug', '')
@@ -190,7 +210,6 @@ def format_movie_message(movie: dict) -> str:
 
 
 def format_content_list(items: list, content_type: str, limit: int = 10) -> str:
-    """Format a list of content for display."""
     if not items:
         return f"No {content_type} available."
     
@@ -202,7 +221,6 @@ def format_content_list(items: list, content_type: str, limit: int = 10) -> str:
         year = item.get('year') or item.get('releaseYear', '')
         rating = item.get('imdbRating', 'N/A')
         slug = item.get('slug', '')
-        
         url = f"{STREAMVAULT_BASE_URL}/{content_type}/{slug}"
         lines.append(f"{emoji} [{title}]({url}) ({year}) ⭐{rating}")
     
@@ -213,21 +231,16 @@ def format_content_list(items: list, content_type: str, limit: int = 10) -> str:
 # ==================== AUTO-POSTING JOB ====================
 
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
-    """Background job that automatically posts new content to the channel."""
     logger.info("🔄 Running auto-post job...")
-    
-    # Refresh cache to get latest content
     refresh_cache()
     
     posted = load_posted_content()
     posted_count = 0
-    max_posts_per_run = 5  # Limit posts per run to avoid spam
+    max_posts_per_run = 5
     
-    # Post new shows
     for show in shows_cache:
         if posted_count >= max_posts_per_run:
             break
-            
         show_id = show.get('id')
         if show_id in posted.get("shows", []):
             continue
@@ -237,33 +250,21 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         
         try:
             if poster_url and poster_url.startswith('http'):
-                await context.bot.send_photo(
-                    chat_id=TELEGRAM_CHANNEL_ID,
-                    photo=poster_url,
-                    caption=message,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await context.bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=poster_url, caption=message, parse_mode=ParseMode.MARKDOWN)
             else:
-                await context.bot.send_message(
-                    chat_id=TELEGRAM_CHANNEL_ID,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await context.bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode=ParseMode.MARKDOWN)
             
             posted["shows"].append(show_id)
             save_posted_content(posted)
             posted_count += 1
             logger.info(f"✅ Auto-posted show: {show.get('title')}")
-            await asyncio.sleep(3)  # Delay between posts
-            
+            await asyncio.sleep(3)
         except Exception as e:
             logger.error(f"Error auto-posting show: {e}")
     
-    # Post new movies
     for movie in movies_cache:
         if posted_count >= max_posts_per_run:
             break
-            
         movie_id = movie.get('id')
         if movie_id in posted.get("movies", []):
             continue
@@ -273,25 +274,15 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         
         try:
             if poster_url and poster_url.startswith('http'):
-                await context.bot.send_photo(
-                    chat_id=TELEGRAM_CHANNEL_ID,
-                    photo=poster_url,
-                    caption=message,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await context.bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=poster_url, caption=message, parse_mode=ParseMode.MARKDOWN)
             else:
-                await context.bot.send_message(
-                    chat_id=TELEGRAM_CHANNEL_ID,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await context.bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode=ParseMode.MARKDOWN)
             
             posted["movies"].append(movie_id)
             save_posted_content(posted)
             posted_count += 1
             logger.info(f"✅ Auto-posted movie: {movie.get('title')}")
             await asyncio.sleep(3)
-            
         except Exception as e:
             logger.error(f"Error auto-posting movie: {e}")
     
@@ -304,7 +295,6 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
 # ==================== COMMAND HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command."""
     welcome_message = f"""
 🎬 *Welcome to StreamVault Bot!*
 
@@ -331,7 +321,6 @@ Your gateway to free movies & TV shows.
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command."""
     help_message = f"""
 📖 *StreamVault Bot Help*
 
@@ -342,16 +331,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /latest - Show latest content
 /movies - Browse recent movies
 /shows - Browse TV shows
-/search <query> - Search for content
+/search <query> - Search content
 /random - Random recommendation
 
-*Examples:*
-• `/search Breaking Bad`
-• `/search Inception`
-
 ━━━━━━━━━━━━━━━━━━━━━
-
-🤖 Bot auto-posts new content every 30 minutes!
 
 📢 *Channel:* {CHANNEL_INVITE_LINK}
 🌐 *Website:* {WEBSITE_URL}
@@ -360,7 +343,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def latest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /latest command."""
     if not shows_cache or not movies_cache:
         refresh_cache()
     
@@ -386,12 +368,10 @@ async def latest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_parts.append(f"▸ [{title}]({url}) ⭐{rating}")
     
     message_parts.extend(["", "━━━━━━━━━━━━━━━━━━━━━", f"📢 *Join:* {CHANNEL_INVITE_LINK}"])
-    
     await update.message.reply_text("\n".join(message_parts), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
 
 async def movies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /movies command."""
     if not movies_cache:
         refresh_cache()
     message = format_content_list(movies_cache, "movies", limit=10)
@@ -399,7 +379,6 @@ async def movies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def shows_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /shows command."""
     if not shows_cache:
         refresh_cache()
     message = format_content_list(shows_cache, "shows", limit=10)
@@ -407,7 +386,6 @@ async def shows_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /search command."""
     if not context.args:
         await update.message.reply_text("❌ Please provide a search query.\n\nExample: `/search Breaking Bad`", parse_mode=ParseMode.MARKDOWN)
         return
@@ -449,7 +427,6 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /random command."""
     if not shows_cache or not movies_cache:
         refresh_cache()
     
@@ -460,12 +437,7 @@ async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     item, content_type = random.choice(all_content)
-    
-    if content_type == 'show':
-        message = format_show_message(item)
-    else:
-        message = format_movie_message(item)
-    
+    message = format_show_message(item) if content_type == 'show' else format_movie_message(item)
     poster = item.get('posterUrl')
     
     try:
@@ -478,17 +450,19 @@ async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /post command - manually trigger auto-post."""
     await update.message.reply_text("📤 Triggering content post to channel...")
     await auto_post_job(context)
     await update.message.reply_text("✅ Done!")
 
 
 def main():
-    """Run the bot with auto-posting."""
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set!")
         return
+    
+    # Start health check server in background thread
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
     
     # Refresh cache on startup
     refresh_cache()
@@ -510,11 +484,10 @@ def main():
     job_queue = application.job_queue
     job_queue.run_repeating(auto_post_job, interval=AUTO_POST_INTERVAL, first=10)
     
-    logger.info("🚀 Starting StreamVault Bot with AUTO-POSTING enabled!")
+    logger.info("🚀 StreamVault Bot started with AUTO-POSTING and HEALTH CHECK!")
     logger.info(f"📢 Channel: {TELEGRAM_CHANNEL_ID}")
-    logger.info(f"⏰ Auto-post interval: {AUTO_POST_INTERVAL} seconds")
+    logger.info(f"🏥 Health check: http://localhost:{PORT}")
     
-    # Run bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
