@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: streamvault-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python telegram_bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHANNEL_ID
+        value: "@streamvaultt"
+      - key: CHANNEL_INVITE_LINK
+        value: "https://t.me/streamvaultt"
+      - key: WEBSITE_URL
+        value: "https://streamvault.live"
